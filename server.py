@@ -1,3 +1,4 @@
+from typing import List
 import os
 import json
 import pymysql
@@ -5,9 +6,11 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import boto3
-from typing import List
 
 load_dotenv()
+
+# Configurable Bedrock model ID for embeddings
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "amazon.titan-embed-g1-text-02")
 
 # ---------- Config & Clients ----------
 # TiDB connection
@@ -18,6 +21,9 @@ TIDB = {
     "password": os.getenv("TIDB_PASSWORD"),
     "database": os.getenv("TIDB_DB"),
     "autocommit": True,
+    "ssl": {
+        "ca": os.getenv("TIDB_SSL_CA_PATH")
+    },
 }
 
 # Bedrock client for embeddings
@@ -30,12 +36,16 @@ bedrock = boto3.client(
 
 def get_embedding(text: str) -> List[float]:
     resp = bedrock.invoke_model(
-        modelId="amazon.titan-text-embedding",
+        modelId=BEDROCK_MODEL_ID,
         contentType="application/json",
         accept="application/json",
         body=json.dumps({"inputText": text})
     )
-    return json.loads(resp["body"].read())["embeddings"]
+    result = json.loads(resp["body"].read())
+    # Bedrock embedding responses use "embedding" as the key
+    if "embedding" in result:
+        return result["embedding"]
+    raise HTTPException(status_code=500, detail=f"No 'embedding' field in response: {result.keys()}")
 
 # ---------- FastAPI App & Models ----------
 app = FastAPI(title="TiDB AI Docs Copilot")
@@ -63,7 +73,7 @@ def search(q: str = Query(..., min_length=1), top_k: int = Query(5, ge=1, le=20)
       doc_id,
       chunk_id,
       content,
-      VEC_COSINE_DISTANCE(embedding, %s) AS score
+      VEC_COSINE_DISTANCE(embedding, CAST(%s AS VECTOR)) AS score
     FROM docs_embeddings
     ORDER BY score
     LIMIT %s;
@@ -71,7 +81,8 @@ def search(q: str = Query(..., min_length=1), top_k: int = Query(5, ge=1, le=20)
     conn = pymysql.connect(**TIDB)
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
-            cur.execute(sql, (query_vec, top_k))
+            vector_json = json.dumps(query_vec)
+            cur.execute(sql, (vector_json, top_k))
             rows = cur.fetchall()
     finally:
         conn.close()

@@ -15,6 +15,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Read configuration from environment
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 DOCS_URL = os.getenv("DOCS_URL")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "pingcap/tidb")
 print(f"[Debug] Using DOCS_URL={DOCS_URL}")
 if not DOCS_URL:
     raise ValueError("Please set DOCS_URL in your .env file")
@@ -50,11 +51,13 @@ def fetch_docs() -> List[Dict[str, Any]]:
         print(f"[Warning] Error fetching docs: {e}")
         return []
 
-def fetch_github_issues(repo: str = "tidb/tidb") -> List[Dict[str, Any]]:
+def fetch_github_issues(repo: str = None) -> List[Dict[str, Any]]:
     """
     Fetch open GitHub issues for the given repo.
     Returns a list of dicts with keys: source, id, chunk.
     """
+    if repo is None:
+        repo = GITHUB_REPO
     headers = {}
     if GITHUB_TOKEN:
         headers["Authorization"] = f"token {GITHUB_TOKEN}"
