@@ -1,3 +1,6 @@
+"""
+embedder.py — take text chunks, call AWS Bedrock Titan V2, and upsert vectors into TiDB
+"""
 import os
 import json
 import pymysql
@@ -7,12 +10,13 @@ from typing import List, Dict, Any
 
 load_dotenv()
 
-# Configurable Bedrock model ID for embeddings.
-# Default is set to "amazon.titan-embed-text-v1".
-# If this default still fails, run `aws bedrock list-models` or consult your console
-# for the exact model ID and set BEDROCK_MODEL_ID in your .env file.
+# Configurable Bedrock embedding model ID (can override via .env).
+# Default is "amazon.titan-embed-text-v1".
+# If you want Titan V2 embeddings, set BEDROCK_MODEL_ID="amazon.titan-embed-text-v2:0".
+# To see available models, run `aws bedrock list-models` or check the AWS console.
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "amazon.titan-embed-text-v1")
 
+# TiDB connection settings, pulling host/user/password from env
 # TiDB connection parameters
 TIDB_CONN = {
     "host": os.getenv("TIDB_HOST"),
@@ -26,6 +30,7 @@ TIDB_CONN = {
     },
 }
 
+# create a Bedrock client to send embedding requests
 # AWS Bedrock client for embeddings
 bedrock = boto3.client(
     "bedrock-runtime",
@@ -34,6 +39,7 @@ bedrock = boto3.client(
     region_name=os.getenv("AWS_REGION", "us-west-2"),
 )
 
+# hit Bedrock Titan to get back a vector for any text
 def get_embedding(text: str) -> List[float]:
     """Call Bedrock to get an embedding vector."""
     response = bedrock.invoke_model(
@@ -44,11 +50,14 @@ def get_embedding(text: str) -> List[float]:
     )
     # Parse the JSON body
     result = json.loads(response["body"].read())
-    # Bedrock returns a top-level "embedding" key with the vector list
+    # Titan V2 returns embeddingsByType.float; fallback to top-level embedding if present
+    if "embeddingsByType" in result and "float" in result["embeddingsByType"]:
+        return result["embeddingsByType"]["float"]
     if "embedding" in result:
         return result["embedding"]
     raise KeyError(f"No 'embedding' found in Bedrock response: {result.keys()}")
 
+# shove one chunk into TiDB (INSERT or UPDATE)
 def upsert_embedding(conn, source: str, doc_id: str, chunk_id: int, content: str, vector: List[float]):
     """Insert or update one chunk embedding into TiDB."""
     sql = """
@@ -61,7 +70,7 @@ def upsert_embedding(conn, source: str, doc_id: str, chunk_id: int, content: str
       embedding = VALUES(embedding),
       updated_at = CURRENT_TIMESTAMP;
     """
-    # Serialize the vector to JSON text for binding
+    # turn the float list into JSON so MySQL can cast it to VECTOR
     vector_json = json.dumps(vector)
     with conn.cursor() as cur:
         cur.execute(sql, (
@@ -72,8 +81,10 @@ def upsert_embedding(conn, source: str, doc_id: str, chunk_id: int, content: str
             vector_json
         ))
 
+# loop through all chunks, embed & upsert each to the DB
 def main(chunks: List[Dict[str, Any]]):
     """Embed and upsert a list of text chunks."""
+    # connect to TiDB (auto-commit on)
     conn = pymysql.connect(**TIDB_CONN)
     try:
         for idx, item in enumerate(chunks):
@@ -90,6 +101,7 @@ def main(chunks: List[Dict[str, Any]]):
     finally:
         conn.close()
 
+# when run directly, scrape docs & issues then embed them all
 if __name__ == "__main__":
     from scraper import fetch_docs, fetch_github_issues
     all_chunks = fetch_docs() + fetch_github_issues()
