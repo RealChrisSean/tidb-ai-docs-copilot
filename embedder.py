@@ -9,6 +9,9 @@ from dotenv import load_dotenv
 from typing import List, Dict, Any
 
 load_dotenv()
+  
+# How many embeddings to upsert in one go to avoid SSL timeouts
+BATCH_SIZE = 100
 
 # Configurable Bedrock embedding model ID (can override via .env).
 # Default is "amazon.titan-embed-text-v1".
@@ -28,6 +31,9 @@ TIDB_CONN = {
     "ssl": {
         "ca": os.getenv("TIDB_SSL_CA_PATH")
     },
+    # prevent packet-too-large and set a shorter connect timeout
+    "connect_timeout": 10,
+    "max_allowed_packet": 67108864,
 }
 
 # create a Bedrock client to send embedding requests
@@ -81,23 +87,37 @@ def upsert_embedding(conn, source: str, doc_id: str, chunk_id: int, content: str
             vector_json
         ))
 
+# Process a batch of chunks in one transaction to reduce per-row overhead
+def upsert_batch(conn, batch: List[tuple]):
+    """
+    Given a list of (item, idx) pairs, embed and upsert each chunk in a single batch.
+    """
+    for item, idx in batch:
+        emb = get_embedding(item["chunk"])
+        upsert_embedding(
+            conn,
+            item["source"],
+            str(item["id"]),
+            idx,
+            item["chunk"],
+            emb
+        )
+    print(f"Upserted batch of {len(batch)} embeddings")
+
 # loop through all chunks, embed & upsert each to the DB
 def main(chunks: List[Dict[str, Any]]):
     """Embed and upsert a list of text chunks."""
-    # connect to TiDB (auto-commit on)
     conn = pymysql.connect(**TIDB_CONN)
     try:
+        batch = []
         for idx, item in enumerate(chunks):
-            emb = get_embedding(item["chunk"])
-            upsert_embedding(
-                conn,
-                item["source"],
-                str(item["id"]),
-                idx,
-                item["chunk"],
-                emb
-            )
-            print(f"Upserted {item['source']}:{item['id']} chunk {idx}")
+            batch.append((item, idx))
+            if len(batch) >= BATCH_SIZE:
+                upsert_batch(conn, batch)
+                batch.clear()
+        # flush any leftover items
+        if batch:
+            upsert_batch(conn, batch)
     finally:
         conn.close()
 

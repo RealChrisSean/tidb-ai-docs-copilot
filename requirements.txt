@@ -5,3 +5,5 @@ requests
 beautifulsoup4
 boto3
 python-dotenv
+transformers>=4.30.0
+torch
